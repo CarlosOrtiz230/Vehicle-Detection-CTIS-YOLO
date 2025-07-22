@@ -70,7 +70,7 @@ def warp_perspective(frame, crop_pts):
         warped = cv2.warpPerspective(frame, matrix, dst_size)
         return warped, matrix
     except Exception as e:
-        print("⚠️ warpPerspective failed:", e)
+        print("warpPerspective failed:", e)
         return frame, None
 
 def get_center(bbox):
@@ -158,6 +158,8 @@ class YOLOApp:
                 cv2.waitKey(1000)
                 cv2.destroyWindow("Cropped Preview")
                 line_pts = select_points_on_image(preview_crop.copy(), "Draw Line (2 Points)", num_points=2)
+                print(f"Line Points: {line_pts}")
+
 
         used_ids, id_positions, count = set(), {}, 0
 
@@ -191,8 +193,9 @@ class YOLOApp:
                                 f.write(f"{datetime.now()} - ID {int(track_id)} crossed\n")
                     id_positions[track_id] = (cx, cy)
                     cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                    cv2.putText(frame, f'ID {int(track_id)}', (int(x1), int(y1)-10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                    label = f'car ID {int(track_id)}'    
+                    cv2.putText(frame, label, (int(x1), int(y1)-10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
             else:
                 for det in detections:
                     x1, y1, x2, y2, _ = map(int, det[:5])
