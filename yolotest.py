@@ -1,3 +1,4 @@
+# yolo_gui.py (Updated & Fixed)
 import cv2
 import os
 import logging
@@ -7,6 +8,8 @@ import numpy as np
 from tkinter import Tk, Label, Button, filedialog, StringVar, OptionMenu, Listbox, SINGLE, END
 from ultralytics import YOLO
 from pathlib import Path
+from sort import Sort
+from datetime import datetime
 
 # ========== Command-Line Flags ==========
 parser = argparse.ArgumentParser(description="YOLOv8 GUI Video Detection")
@@ -32,54 +35,60 @@ devices = {
     "GPU (CUDA)": "cuda"
 }
 
-# ========== Crop Helpers ==========
-def select_crop_points(video_path):
-    cap = cv2.VideoCapture(video_path)
-    ret, frame = cap.read()
-    cap.release()
-    if not ret:
-        print("❌ Could not read first frame.")
-        return None
+trackers = ["None", "SORT", "DeepSORT"]
 
-    clone = frame.copy()
+# ========== Crop & Line Selection ==========
+def select_points_on_image(image, prompt="Select Points", num_points=4):
+    clone = image.copy()
     points = []
 
     def click_event(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN and len(points) < 4:
+        if event == cv2.EVENT_LBUTTONDOWN and len(points) < num_points:
             points.append((x, y))
             cv2.circle(clone, (x, y), 5, (0, 0, 255), -1)
-            cv2.imshow("Select 4 Points (TL, TR, BR, BL)", clone)
+            cv2.imshow(prompt, clone)
 
-    cv2.imshow("Select 4 Points (TL, TR, BR, BL)", clone)
-    cv2.setMouseCallback("Select 4 Points (TL, TR, BR, BL)", click_event)
+    cv2.imshow(prompt, clone)
+    cv2.setMouseCallback(prompt, click_event)
 
-    while len(points) < 4:
+    while len(points) < num_points:
         if cv2.waitKey(1) & 0xFF == 27:
             break
 
     cv2.destroyAllWindows()
     return points
 
-def warp_perspective(frame, points):
+def warp_perspective(frame, crop_pts):
     dst_size = (500, 500)
-    pts_src = np.array(points, dtype="float32")
-    pts_dst = np.array([
-        [0, 0],
-        [dst_size[0] - 1, 0],
-        [dst_size[0] - 1, dst_size[1] - 1],
-        [0, dst_size[1] - 1]
-    ], dtype="float32")
-    matrix = cv2.getPerspectiveTransform(pts_src, pts_dst)
-    return cv2.warpPerspective(frame, matrix, dst_size)
+    try:
+        pts_src = np.array(crop_pts, dtype="float32")
+        pts_dst = np.array([
+            [0, 0], [dst_size[0] - 1, 0],
+            [dst_size[0] - 1, dst_size[1] - 1], [0, dst_size[1] - 1]
+        ], dtype="float32")
+        matrix = cv2.getPerspectiveTransform(pts_src, pts_dst)
+        warped = cv2.warpPerspective(frame, matrix, dst_size)
+        return warped, matrix
+    except Exception as e:
+        print("⚠️ warpPerspective failed:", e)
+        return frame, None
+
+def get_center(bbox):
+    x1, y1, x2, y2 = bbox
+    return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+def line_crossed(p1, p2, line):
+    def side(p, a, b):
+        return np.sign((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]))
+    return side(p1, *line) != side(p2, *line)
 
 # ========== GUI ==========
 class YOLOApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("YOLOv8 Car Detector")
-        self.root.geometry("620x500")
+        self.root.title("YOLOv8 CTIS Car Detector")
+        self.root.geometry("650x560")
 
-        # Model override by flag
         if args.heavy:
             self.default_model = "YOLOv8 XLarge (yolov8x.pt)"
         elif args.medium:
@@ -103,6 +112,10 @@ class YOLOApp:
         self.crop_enabled = StringVar(value="Enable Crop")
         OptionMenu(root, self.crop_enabled, "Enable Crop", "Disable Crop").pack(pady=5)
 
+        Label(root, text="Tracking Mode:").pack()
+        self.tracker_choice = StringVar(value="SORT")
+        OptionMenu(root, self.tracker_choice, *trackers).pack(pady=5)
+
         Label(root, text="Choose video source:").pack(pady=10)
         Button(root, text="Use Camera", command=self.use_camera).pack(pady=5)
         Button(root, text="Import Video File", command=self.import_video).pack(pady=5)
@@ -124,48 +137,73 @@ class YOLOApp:
         selected_model = self.model_choice.get()
         model_file = models[selected_model]
         device = devices[self.device_choice.get()]
-        cache_path = Path.home() / ".cache" / "ultralytics" / model_file
-        if cache_path.exists():
-            print(f"✔ Model cached: {model_file}")
-        else:
-            print(f"⬇ Downloading model: {model_file}")
         return YOLO(model_file).to(device)
 
     def run_yolo(self, source):
         model = self.get_model()
-        crop_points = None
-        if source != "camera" and self.crop_enabled.get() == "Enable Crop":
-            crop_points = select_crop_points(source)
+        tracker = Sort() if self.tracker_choice.get() == "SORT" else None
 
         cap = cv2.VideoCapture(0 if source == "camera" else source)
-        if not cap.isOpened():
-            print("Error opening video.")
+        ret, frame = cap.read()
+        if not ret:
+            print("Error reading video.")
             return
 
-        print("🟢 Running detection...")
-        class_names = model.names
+        crop_pts, line_pts, matrix = None, None, None
+        if source != "camera" and self.crop_enabled.get() == "Enable Crop":
+            crop_pts = select_points_on_image(frame.copy(), "Select 4 Crop Points", num_points=4)
+            if len(crop_pts) == 4:
+                preview_crop, matrix = warp_perspective(frame.copy(), crop_pts)
+                cv2.imshow("Cropped Preview", preview_crop)
+                cv2.waitKey(1000)
+                cv2.destroyWindow("Cropped Preview")
+                line_pts = select_points_on_image(preview_crop.copy(), "Draw Line (2 Points)", num_points=2)
+
+        used_ids, id_positions, count = set(), {}, 0
 
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            if crop_points and len(crop_points) == 4:
-                frame = warp_perspective(frame, crop_points)
+            if matrix is not None:
+                frame = cv2.warpPerspective(frame, matrix, (500, 500))
 
-            results = model(frame)[0]
-            for box in results.boxes:
-                cls_id = int(box.cls[0])
-                cls_name = class_names[cls_id]
-                if cls_name == 'car':
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, f'{cls_name}', (x1, y1 - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    if self.enable_logging.get() == "Enable Logs":
-                        logging.info(f'Detection: {cls_name} at ({x1}, {y1}, {x2}, {y2})')
+            result = model(frame, verbose=False)[0]
+            detections = []
+            for box in result.boxes:
+                cls_id = int(box.cls.item())
+                if model.names[cls_id] == "car":
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+                    conf = float(box.conf.item())
+                    detections.append([x1, y1, x2, y2, conf])
 
-            cv2.imshow(f'YOLOv8 - {Path(source).name if source != "camera" else "Camera"}', frame)
+            if tracker and detections:
+                tracks = tracker.update(np.array(detections))
+                for x1, y1, x2, y2, track_id in tracks:
+                    cx, cy = get_center([x1, y1, x2, y2])
+                    if track_id in id_positions:
+                        prev = id_positions[track_id]
+                        if line_pts and line_crossed(prev, (cx, cy), line_pts) and track_id not in used_ids:
+                            count += 1
+                            used_ids.add(track_id)
+                            with open("counter.log", "a") as f:
+                                f.write(f"{datetime.now()} - ID {int(track_id)} crossed\n")
+                    id_positions[track_id] = (cx, cy)
+                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                    cv2.putText(frame, f'ID {int(track_id)}', (int(x1), int(y1)-10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+            else:
+                for det in detections:
+                    x1, y1, x2, y2, _ = map(int, det[:5])
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 100, 255), 2)
+
+            cv2.putText(frame, f"Count: {count}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+            if line_pts:
+                cv2.line(frame, line_pts[0], line_pts[1], (0, 0, 255), 2)
+
+            cv2.imshow("YOLOv8 Detection", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
@@ -187,14 +225,14 @@ class YOLOApp:
             full_path = os.path.join(videos_folder, filename)
             threading.Thread(target=self.run_yolo, args=(full_path,), daemon=True).start()
 
-# ========== Logging Init (after GUI to obey flag) ==========
+# ========== Logging ==========
 logging.basicConfig(
     filename='detections.log',
     level=logging.INFO,
-    format='%(asctime)s - %(message)s',
+    format='%(asctime)s - %(message)s'
 )
 
-# ========== Run GUI ==========
+# ========== Launch ==========
 if __name__ == "__main__":
     root = Tk()
     app = YOLOApp(root)

@@ -43,6 +43,8 @@ Choose from official YOLOv8 models:
 
 ---
 
+## REQUIREMETNS
+
 ## Command-Line Flags
 
 To pre-select a model before launching the GUI, run with one of the following flags:
@@ -51,3 +53,6 @@ To pre-select a model before launching the GUI, run with one of the following fl
 python yolo_gui.py --heavy      # Uses yolov8x (Extra Large)
 python yolo_gui.py --medium     # Uses yolov8m (Medium)
 python yolo_gui.py --light      # Uses yolov8n (Nano)
+
+ 
+
